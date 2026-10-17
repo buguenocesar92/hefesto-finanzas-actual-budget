@@ -1,0 +1,6 @@
+services:
+  app:
+    environment:
+      BOOTSTRAP_MODE: "true"
+  gateway:
+    ports: ["127.0.0.1:8113:8080"]

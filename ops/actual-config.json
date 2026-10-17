@@ -1,0 +1,9 @@
+{
+  "loginMethod": "password",
+  "allowedLoginMethods": [
+    "password"
+  ],
+  "corsProxy": {
+    "enabled": false
+  }
+}

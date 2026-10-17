@@ -1,0 +1,4 @@
+# Combinar con compose.yaml y compose.bootstrap.yaml en otro proyecto.
+networks:
+  default:
+    internal: true

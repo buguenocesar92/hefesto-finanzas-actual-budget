@@ -1,0 +1,56 @@
+name: ${COMPOSE_PROJECT_NAME:-hefesto-finanzas}
+services:
+  permissions:
+    image: actualbudget/actual-server:26.10.0@sha256:24645e971da6bb1a1f953d6859e307a0b29be1e8b4130a35b3220c209b5b860c
+    restart: "no"
+    user: "0"
+    entrypoint: [sh, -ec, 'chown -R 1001:1001 /files; chmod 700 /files']
+    volumes: [data:/files]
+  app:
+    image: actualbudget/actual-server:26.10.0@sha256:24645e971da6bb1a1f953d6859e307a0b29be1e8b4130a35b3220c209b5b860c
+    restart: unless-stopped
+    user: "1001:1001"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    stop_grace_period: 60s
+    depends_on:
+      permissions: {condition: service_completed_successfully}
+    command: [sh, /opt/hefesto/start.sh]
+    environment:
+      NODE_ENV: production
+      ACTUAL_PORT: "5006"
+      ACTUAL_HOSTNAME: 0.0.0.0
+      ACTUAL_DATA_DIR: /data
+      ACTUAL_SERVER_FILES: /data/server-files
+      ACTUAL_USER_FILES: /data/user-files
+      ACTUAL_CONFIG_PATH: /opt/hefesto/actual-config.json
+      ACTUAL_LOGIN_METHOD: password
+      ACTUAL_ALLOWED_LOGIN_METHODS: password
+      ACTUAL_TOKEN_EXPIRATION: "1440"
+      ACTUAL_CORS_PROXY_ENABLED: "false"
+      BOOTSTRAP_MODE: "false"
+      TZ: America/Santiago
+    expose: ["5006"]
+    networks: [backend]
+    volumes: [data:/data, ./ops:/opt/hefesto:ro]
+  gateway:
+    image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    restart: unless-stopped
+    entrypoint: [sh, /opt/hefesto/gateway-start.sh]
+    depends_on: [app]
+    environment:
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?Configurar usuario}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?Configurar bcrypt}
+    expose: ["8080"]
+    networks: [default, backend]
+    volumes: [./ops:/opt/hefesto:ro]
+  filetools:
+    image: actualbudget/actual-server:26.10.0@sha256:24645e971da6bb1a1f953d6859e307a0b29be1e8b4130a35b3220c209b5b860c
+    profiles: [tools]
+    user: "0"
+    volumes: [data:/files]
+volumes:
+  data:
+networks:
+  backend:
+    internal: true
