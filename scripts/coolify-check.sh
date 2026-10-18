@@ -45,17 +45,29 @@ if grep -qE '^name:' "$ROOT/$COMPOSE_FILE"; then
     record_fail "$COMPOSE_FILE" "name: raíz presente ($LINE); Coolify pone el project name"
 fi
 
-# name: en networks/volumes: inspección estructural con PyYAML.
-NM_OUTPUT="$(mktemp -t nm-check.XXXXXX)"
-trap 'rm -f "$TMP_ENV" "$NM_OUTPUT"' EXIT
-COMPOSE_YAML="$ROOT/$COMPOSE_FILE" python3 <<'PY' >"$NM_OUTPUT" || true
-import os, sys, yaml
+# name: en networks/volumes: inspección estructural con PyYAML sobre el
+# YAML original. Si PyYAML no está disponible o el YAML no parsea, hay
+# que fallar con un motivo claro: el render de docker compose genera
+# nombres por defecto y no permite distinguir un "name:" explícito,
+# así que omitir la inspección abriría la puerta a name: hardcoded.
+NM_PROBLEMS_OUT="$(mktemp -t nm-check.XXXXXX)"
+NM_ERR="$(mktemp -t nm-check-err.XXXXXX)"
+# Trap único: usa expansión ${VAR:-} porque TMP_ENV aún no existe en este
+# punto y la inspección de PyYAML puede abortar antes de definirlo.
+trap 'rm -f "${TMP_ENV:-}" "$NM_PROBLEMS_OUT" "$NM_ERR"' EXIT
+if ! COMPOSE_YAML="$ROOT/$COMPOSE_FILE" python3 <<'PY' >"$NM_PROBLEMS_OUT" 2>"$NM_ERR"
+import os, sys
+try:
+    import yaml
+except ImportError as e:
+    sys.stderr.write(f"PyYAML no disponible: {e}\n")
+    sys.exit(2)
 try:
     with open(os.environ["COMPOSE_YAML"]) as f:
         doc = yaml.safe_load(f) or {}
 except Exception as e:
     sys.stderr.write(f"yaml parse: {e}\n")
-    sys.exit(0)
+    sys.exit(3)
 problems = []
 for kind in ("networks", "volumes"):
     section = doc.get(kind) or {}
@@ -65,8 +77,15 @@ for kind in ("networks", "volumes"):
 if problems:
     print("\n".join(problems))
 PY
-NM_PROBLEMS="$(cat "$NM_OUTPUT")"
-rm -f "$NM_OUTPUT"
+then
+    NM_REASON="$(tr '\n' ' ' < "$NM_ERR" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    record_fail "$COMPOSE_FILE" "no se pudo inspeccionar networks/volumes: ${NM_REASON}"
+    rm -f "$NM_PROBLEMS_OUT" "$NM_ERR"
+    exit 1
+fi
+rm -f "$NM_ERR"
+NM_PROBLEMS="$(cat "$NM_PROBLEMS_OUT")"
+rm -f "$NM_PROBLEMS_OUT"
 if [[ -n "$NM_PROBLEMS" ]]; then
     while IFS= read -r line; do
         [[ -n "$line" ]] && record_fail "$COMPOSE_FILE" "name: en networks/volumes ($line); Coolify pone los nombres"
@@ -78,7 +97,9 @@ fi
 # ---------------------------------------------------------------
 
 TMP_ENV="$(mktemp -t coolify-check.XXXXXX.env)"
-trap 'rm -f "$TMP_ENV"' EXIT
+# El trap conserva la limpieza de NM_PROBLEMS_OUT y NM_ERR por si el
+# script aborta en el bloque B después de pasar el A.
+trap 'rm -f "$TMP_ENV" "$NM_PROBLEMS_OUT" "$NM_ERR"' EXIT
 
 # 1) Generar .env temporal con valores ficticios por cada ${VAR} del compose.
 mapfile -t VARS < <(grep -oE '\$\{[A-Z_][A-Z0-9_]*(:[-?][^}]*)?\}' "$ROOT/$COMPOSE_FILE" \
