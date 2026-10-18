@@ -14,6 +14,7 @@ Linux con Docker Engine, Compose v2 y Python 3.11+; dominio HTTPS para publicar.
 Incluye Compose base, bootstrap por túnel, ensayo con red interna, comprobación del datastore antes del inicio público, respaldo/validación/restauración y ejemplo CSV ficticio. No incluye imágenes Docker ni datos reales.
 
 ## Primera instalación privada
+> Si esta carpeta viene del zip original `hefesto-finanzas-actual-budget.zip` (no clonado de git), el `compose.yaml` incluido fijaba el nombre del proyecto a `hefesto-finanzas` y el volumen a `hefesto-finanzas_data`. La versión actual no usa `name:` raíz: Coolify pone el nombre del proyecto; en una instalación manual Compose pasa a usar `<directorio>_data` y el volumen previo queda huérfano. Para conservar los datos existentes al actualizar, definir `COMPOSE_PROJECT_NAME=hefesto-finanzas` en el `.env` local —equivalente a `docker compose -p hefesto-finanzas …`— antes de levantar los servicios. Recuperar el respaldo del volumen antiguo según docs/RESPALDO.md si la instalación previa usaba un nombre distinto.
 1. Descomprimir y entrar en esta carpeta. Ejecutar `python3 scripts/configure.py`: crea .env 0600 sin sobrescribir.
 2. Crear un hash de acceso a la pasarela con entrada interactiva de contraseña:
 
@@ -43,11 +44,11 @@ TLS termina en Coolify. Usar dominio raíz, sin subruta. Caddy conserva los enca
 
 ### Variables de entorno del recurso
 - `BASIC_AUTH_USER`: 3–48 caracteres alfanuméricos, guion o guion bajo. Distinto del password nativo de Actual.
-- `BASIC_AUTH_HASH`: hash bcrypt (formato `$2a$`, `$2b$` o `$2y$` con coste 8–16). Pegar **literal**, sin comillas envolventes ni escape; Coolify lo pasa al contenedor como variable de entorno y el `$` llega intacto al script de arranque.
+- `BASIC_AUTH_HASH`: hash bcrypt (formato `$2a$`, `$2b$` o `$2y$` con coste 8–16). En Coolify, marcar la variable como **Is Literal** y pegar el hash tal cual, sin comillas envolventes; alternativamente, escapar cada `$` como `$$` para que `docker compose` no interprete los `$2b$` del hash como variables propias.
 - `BOOTSTRAP_MODE` (opcional): por defecto `false`. Poner `true` solo para el primer arranque que necesite crear el password nativo inicial; tras definirlo en la UI, dejar en `false` y recrear el servicio. El contenedor base ya trae `BOOTSTRAP_MODE` inactivo.
 
 ### Healthchecks incluidos
-`services/app` y `services/gateway` declaran healthcheck TCP contra el puerto interno (5006 y 8080, respectivamente). Coolify los respeta automáticamente; no definir uno paralelo en el panel. Una comprobación anónima del gateway devuelve 401 por diseño; el check interno es de puerto, no exige 200 ni autenticación.
+`services/gateway` declara un healthcheck TCP contra el puerto interno 8080. `services/app` declara un check contra `http://127.0.0.1:5006/health` (endpoint `/health` que la imagen `actualbudget/actual-server` expone desde 22.10.25); se hace con `node` inline porque la imagen base no incluye `nc`. Ambos checks son anónimos: ni header, ni cookie, ni query. Coolify los respeta automáticamente; no definir uno paralelo en el panel.
 
 ### Validación previa al despliegue
 Antes de promover cambios al recurso, ejecutar en el checkout:

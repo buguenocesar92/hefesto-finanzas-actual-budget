@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # scripts/coolify-check.sh
 # Verifica que compose.yaml cumpla el contrato para Coolify del MVP Hefesto.
-# Contrato común: ver .superpowers/minimax/coolify/plan.md
+# Detalle del contrato y de las excepciones: ver README, sección
+# «Despliegue en Coolify (MVP Hefesto)».
 #
 # Sale 0 si cumple, 1 con motivo si falla.
 # Uso: bash scripts/coolify-check.sh
@@ -31,37 +32,45 @@ note() { printf '  · %s\n' "$*"; }
 
 # ---------------------------------------------------------------
 # Bloque A: validación contra el YAML original.
-# name: hardcoded a nivel raíz, en networks o en volumes está
-# prohibido. Coolify pone el project name; un default en la
-# variable cuenta como "fijo" y se rechaza.
+# Cualquier "name:" a nivel raíz, en networks o en volumes es
+# rechazado: Coolify pone el project name y los nombres por defecto
+# de redes/volúmenes. La detección de networks/volumes se hace con
+# PyYAML sobre el YAML original porque el render de docker compose
+# genera nombres y no permite distinguir un "name:" explícito.
 # ---------------------------------------------------------------
 
-# name: a nivel raíz.
-if grep -E '^name:' "$ROOT/$COMPOSE_FILE" >/dev/null 2>&1; then
-    NAME_LINE="$(grep -E '^name:' "$ROOT/$COMPOSE_FILE" || true)"
-    if [[ -n "$NAME_LINE" ]]; then
-        # Si la línea tiene un valor no parametrizado (no es ${VAR}), falla.
-        if ! echo "$NAME_LINE" | grep -qE '^name:[[:space:]]+\$\{'; then
-            record_fail "$COMPOSE_FILE" "name: raíz no parametrizado ($NAME_LINE)"
-        # Si tiene default (${VAR:-default}), también falla.
-        elif echo "$NAME_LINE" | grep -qE '^name:[[:space:]]+\$\{[^}]*:-\}'; then
-            record_fail "$COMPOSE_FILE" "name: raíz con default (Coolify pone el project name)"
-        fi
-    fi
+# name: a nivel raíz: cualquier línea que empiece con "name:" falla.
+if grep -qE '^name:' "$ROOT/$COMPOSE_FILE"; then
+    LINE="$(grep -E '^name:' "$ROOT/$COMPOSE_FILE" | head -1)"
+    record_fail "$COMPOSE_FILE" "name: raíz presente ($LINE); Coolify pone el project name"
 fi
 
-# name: en networks o volumes (líneas con indentación ≥ 2 espacios).
-# Buscar líneas que sean "name: valor_no_vacio" con esa indentación.
-INDENTED_NAME="$(grep -E '^[[:space:]]{2,}name:[[:space:]]+' "$ROOT/$COMPOSE_FILE" || true)"
-if [[ -n "$INDENTED_NAME" ]]; then
-    # Verificar que no sea una interpolación ${VAR}.
+# name: en networks/volumes: inspección estructural con PyYAML.
+NM_OUTPUT="$(mktemp -t nm-check.XXXXXX)"
+trap 'rm -f "$TMP_ENV" "$NM_OUTPUT"' EXIT
+COMPOSE_YAML="$ROOT/$COMPOSE_FILE" python3 <<'PY' >"$NM_OUTPUT" || true
+import os, sys, yaml
+try:
+    with open(os.environ["COMPOSE_YAML"]) as f:
+        doc = yaml.safe_load(f) or {}
+except Exception as e:
+    sys.stderr.write(f"yaml parse: {e}\n")
+    sys.exit(0)
+problems = []
+for kind in ("networks", "volumes"):
+    section = doc.get(kind) or {}
+    for key, value in section.items():
+        if isinstance(value, dict) and "name" in value:
+            problems.append(f"{kind}/{key} tiene name: {value['name']!r}")
+if problems:
+    print("\n".join(problems))
+PY
+NM_PROBLEMS="$(cat "$NM_OUTPUT")"
+rm -f "$NM_OUTPUT"
+if [[ -n "$NM_PROBLEMS" ]]; then
     while IFS= read -r line; do
-        if ! echo "$line" | grep -qE 'name:[[:space:]]+\$\{'; then
-            record_fail "$COMPOSE_FILE" "name: hardcoded en networks/volumes ($line)"
-        elif echo "$line" | grep -qE 'name:[[:space:]]+\$\{[^}]*:-\}'; then
-            record_fail "$COMPOSE_FILE" "name: con default en networks/volumes ($line)"
-        fi
-    done <<< "$INDENTED_NAME"
+        [[ -n "$line" ]] && record_fail "$COMPOSE_FILE" "name: en networks/volumes ($line); Coolify pone los nombres"
+    done <<< "$NM_PROBLEMS"
 fi
 
 # ---------------------------------------------------------------
@@ -92,38 +101,47 @@ mapfile -t VARS < <(grep -oE '\$\{[A-Z_][A-Z0-9_]*(:[-?][^}]*)?\}' "$ROOT/$COMPO
     done
 } > "$TMP_ENV"
 
-# 2) Renderizar el compose. stderr se descarta: solo stdout JSON nos sirve.
-if ! RENDER="$(docker compose --project-directory "$ROOT" -f "$ROOT/$COMPOSE_FILE" --env-file "$TMP_ENV" config --format json 2>/dev/null)"; then
+# 2) Renderizar el compose. stderr se conserva para diagnóstico.
+if ! RENDER="$(docker compose --project-directory "$ROOT" -f "$ROOT/$COMPOSE_FILE" --env-file "$TMP_ENV" config --format json 2>&1)"; then
     echo "FAIL render: no se pudo renderizar $COMPOSE_FILE con valores ficticios"
-    docker compose --project-directory "$ROOT" -f "$ROOT/$COMPOSE_FILE" --env-file "$TMP_ENV" config 2>&1 || true
+    echo "$RENDER" || true
     exit 1
 fi
+# Si docker compose mezcló advertencias con el JSON, quitar las WARNING y
+# quedarse con el primer objeto JSON que empieza en la primera línea "{".
+FIRST_JSON="$(printf '%s\n' "$RENDER" | awk '/^\{/{found=1} found{print} /^\}/{if (found) exit}')"
+if [[ -z "$FIRST_JSON" ]]; then
+    echo "FAIL render: salida sin JSON válido"
+    echo "$RENDER" || true
+    exit 1
+fi
+RENDER="$FIRST_JSON"
 
 # 3) Validar contra el render JSON.
 # Punto 1: en servicios sin profiles, no puede haber escapes del sandbox.
-mapfile -t SERVICES < <(echo "$RENDER" | jq -r '.services | keys[]')
+mapfile -t SERVICES < <(printf '%s\n' "$RENDER" | jq -r '.services | keys[]')
 for svc in "${SERVICES[@]}"; do
-    PROFILES_JSON="$(echo "$RENDER" | jq -c ".services[\"$svc\"].profiles // []")"
+    PROFILES_JSON="$(printf '%s\n' "$RENDER" | jq -c ".services[\"$svc\"].profiles // []")"
     if [[ "$PROFILES_JSON" != "[]" ]]; then
         note "servicio $svc tiene profiles, omitido del contrato"
         continue
     fi
 
     # ports
-    PORTS_LEN="$(echo "$RENDER" | jq -r ".services[\"$svc\"].ports // [] | length")"
+    PORTS_LEN="$(printf '%s\n' "$RENDER" | jq -r ".services[\"$svc\"].ports // [] | length")"
     if [[ "$PORTS_LEN" -gt 0 ]]; then
         record_fail "$svc" "tiene ports (debe ser expose)"
     fi
 
     # container_name
-    CNAME="$(echo "$RENDER" | jq -r ".services[\"$svc\"].container_name // empty")"
+    CNAME="$(printf '%s\n' "$RENDER" | jq -r ".services[\"$svc\"].container_name // empty")"
     if [[ -n "$CNAME" ]]; then
         record_fail "$svc" "container_name '$CNAME'"
     fi
 
     # privileged, cap_add, devices
     for k in privileged cap_add devices; do
-        V="$(echo "$RENDER" | jq -r ".services[\"$svc\"].$k // empty")"
+        V="$(printf '%s\n' "$RENDER" | jq -r ".services[\"$svc\"].$k // empty")"
         if [[ -n "$V" && "$V" != "null" && "$V" != "[]" ]]; then
             record_fail "$svc" "$k presente"
         fi
@@ -131,33 +149,36 @@ for svc in "${SERVICES[@]}"; do
 
     # network_mode, pid, ipc: host
     for k in network_mode pid ipc; do
-        V="$(echo "$RENDER" | jq -r ".services[\"$svc\"].$k // empty")"
+        V="$(printf '%s\n' "$RENDER" | jq -r ".services[\"$svc\"].$k // empty")"
         if [[ "$V" == "host" ]]; then
             record_fail "$svc" "$k: host"
         fi
     done
 
     # security_opt unconfined
-    if echo "$RENDER" | jq -e ".services[\"$svc\"].security_opt // [] | map(select(test(\"unconfined\"))) | length > 0" >/dev/null; then
+    if printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"].security_opt // [] | map(select(test(\"unconfined\"))) | length > 0" >/dev/null; then
         record_fail "$svc" "security_opt unconfined"
     fi
 
     # binds a docker.sock u otros sockets
-    if echo "$RENDER" | jq -e ".services[\"$svc\"].volumes[]? | select(.type == \"bind\" and (.source == \"/var/run/docker.sock\" or (.source | test(\"^/var/run/.+\\\\.sock$\"))))" >/dev/null 2>&1; then
+    if printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"].volumes[]? | select(.type == \"bind\" and (.source == \"/var/run/docker.sock\" or (.source | test(\"^/var/run/.+\\\\.sock$\"))))" >/dev/null 2>&1; then
         record_fail "$svc" "bindeó socket"
     fi
 done
 
-# Punto 6: healthcheck que no dependa de credenciales en servicios web (app, gateway).
-for svc in app gateway; do
-    if ! echo "$RENDER" | jq -e ".services[\"$svc\"]" >/dev/null; then
+# Punto 6: healthcheck que no dependa de credenciales en servicios web (gateway).
+# El contrato exige healthcheck solo en el servicio web que Coolify expone,
+# que es gateway. app no se valida porque su check depende del endpoint
+# /health interno y de la imagen upstream; se documenta en el README.
+for svc in gateway; do
+    if ! printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"]" >/dev/null; then
         continue
     fi
-    PROFILES_JSON="$(echo "$RENDER" | jq -c ".services[\"$svc\"].profiles // []")"
+    PROFILES_JSON="$(printf '%s\n' "$RENDER" | jq -c ".services[\"$svc\"].profiles // []")"
     if [[ "$PROFILES_JSON" != "[]" ]]; then
         continue
     fi
-    if ! echo "$RENDER" | jq -e ".services[\"$svc\"].healthcheck" >/dev/null; then
+    if ! printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"].healthcheck" >/dev/null; then
         record_fail "$svc" "falta healthcheck que no dependa de credenciales"
     fi
 done

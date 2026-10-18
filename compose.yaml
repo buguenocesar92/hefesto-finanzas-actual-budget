@@ -33,7 +33,10 @@ services:
     networks: [backend]
     volumes: [data:/data, ./ops:/opt/hefesto:ro]
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 5006 || exit 1"]
+      # La imagen actualbudget/actual-server expone /health (nodo UP) desde
+      # 22.10.25 y la imagen Debian-slim no incluye nc, así que el check se
+      # hace con node inline. Sin credenciales: ni header, ni cookie, ni query.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5006/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
