@@ -14,6 +14,7 @@ Linux con Docker Engine, Compose v2 y Python 3.11+; dominio HTTPS para publicar.
 Incluye Compose base, bootstrap por túnel, ensayo con red interna, comprobación del datastore antes del inicio público, respaldo/validación/restauración y ejemplo CSV ficticio. No incluye imágenes Docker ni datos reales.
 
 ## Primera instalación privada
+> Si esta carpeta viene del zip original `hefesto-finanzas-actual-budget.zip` (no clonado de git), el `compose.yaml` incluido fijaba el nombre del proyecto a `hefesto-finanzas` y el volumen a `hefesto-finanzas_data`. La versión actual no usa `name:` raíz: Coolify pone el nombre del proyecto; en una instalación manual Compose pasa a usar `<directorio>_data` y el volumen previo queda huérfano. Para conservar los datos existentes al actualizar, definir `COMPOSE_PROJECT_NAME=hefesto-finanzas` en el `.env` local —equivalente a `docker compose -p hefesto-finanzas …`— antes de levantar los servicios. Recuperar el respaldo del volumen antiguo según docs/RESPALDO.md si la instalación previa usaba un nombre distinto.
 1. Descomprimir y entrar en esta carpeta. Ejecutar `python3 scripts/configure.py`: crea .env 0600 sin sobrescribir.
 2. Crear un hash de acceso a la pasarela con entrada interactiva de contraseña:
 
@@ -34,14 +35,29 @@ docker compose -f compose.yaml -f compose.bootstrap.yaml up -d
 
 El bootstrap permite el alta nativa inicial, pero no inventa tablas ni contraseñas en SQLite. El inicio base exige account.sqlite íntegro, un método password activo con hash reconocido y el usuario propietario del primer login. Si hay datos parciales o esquema diferente, falla para revisión; no borra el volumen. El validador no comprueba que recuerdas la contraseña ni que se puedan descifrar todos los presupuestos.
 
-## Publicar en Coolify
+## Despliegue en Coolify (MVP Hefesto)
 Si el setup se hizo con Compose manual, respaldar y detener usando ambos archivos antes de pasar al recurso público. Coolify puede asignar nombres distintos a volúmenes: recuperar el respaldo en el volumen del recurso nuevo según docs/RESPALDO.md; no asumir que verá los datos del proyecto manual.
 
-Importar la carpeta/repo privado como Docker Compose y seleccionar **compose.yaml**. Mantener el montaje ops/ en el checkout. Pegar usuario y bcrypt en variables del recurso; en el formulario, el hash se pega literal sin comillas envolventes. Asignar dominio HTTPS únicamente al servicio **gateway**, puerto **8080**. No publicar app, 5006 ni puertos del host. No utilizar compose.bootstrap.yaml en el servicio público.
+Importar la carpeta/repo privado como Docker Compose y seleccionar **compose.yaml**. Mantener el montaje `ops/` en el checkout. Pegar las variables del recurso en Coolify y asignar dominio HTTPS únicamente al servicio **gateway**, puerto interno **8080**. No publicar app, 5006 ni puertos del host. No utilizar `compose.bootstrap.yaml` ni `compose.rehearsal.yaml` en el servicio público; el primero es setup local por túnel SSH y el segundo es un fragmento para combinar en otro proyecto.
 
 TLS termina en Coolify. Usar dominio raíz, sin subruta. Caddy conserva los encabezados nativos que usa Actual, incluidos los de aislamiento; no se añade una CSP que rompa workers/WASM. Verificar en el navegador sincronización y ausencia de errores de seguridad de contexto/SharedArrayBuffer.
 
-Una comprobación anónima de gateway devuelve 401 por diseño: no configurar un healthcheck que exija 200 sin credenciales. Probar acceso autenticado en privado y confirmar desde fuera que no existe acceso directo a app.
+### Variables de entorno del recurso
+- `BASIC_AUTH_USER`: 3–48 caracteres alfanuméricos, guion o guion bajo. Distinto del password nativo de Actual.
+- `BASIC_AUTH_HASH`: hash bcrypt (formato `$2a$`, `$2b$` o `$2y$` con coste 8–16). En Coolify, marcar la variable como **Is Literal** y pegar el hash tal cual, sin comillas envolventes; alternativamente, escapar cada `$` como `$$` para que `docker compose` no interprete los `$2b$` del hash como variables propias.
+- `BOOTSTRAP_MODE` (opcional): por defecto `false`. Poner `true` solo para el primer arranque que necesite crear el password nativo inicial; tras definirlo en la UI, dejar en `false` y recrear el servicio. El contenedor base ya trae `BOOTSTRAP_MODE` inactivo.
+
+### Healthchecks incluidos
+`services/gateway` declara un healthcheck TCP contra el puerto interno 8080. `services/app` declara un check contra `http://127.0.0.1:5006/health` (endpoint `/health` que la imagen `actualbudget/actual-server` expone desde 22.10.25); se hace con `node` inline porque la imagen base no incluye `nc`. Ambos checks son anónimos: ni header, ni cookie, ni query. Coolify los respeta automáticamente; no definir uno paralelo en el panel.
+
+### Validación previa al despliegue
+Antes de promover cambios al recurso, ejecutar en el checkout:
+
+```sh
+bash scripts/coolify-check.sh
+```
+
+El script genera un `.env` temporal con valores ficticios, renderiza `compose.yaml` con `docker compose config` y verifica que se cumpla el contrato del MVP: ausencia de escapes del sandbox (ports host, `container_name`, `privileged`, `cap_add`, `devices`, `network_mode/pid/ipc: host`, `security_opt unconfined`, bind de sockets), ausencia de `name:` hardcoded y presencia de los healthchecks anteriores. Sale con `PASS` o lista los motivos de fallo.
 
 El contenedor base no tiene BOOTSTRAP_MODE activo. Para retirar bootstrap en una instalación manual: detener con ambos archivos y recrear usando solo compose.yaml; comprobar que desapareció el puerto 8113. Cambiar un archivo Compose no cambia por sí solo el entorno de un contenedor ya creado.
 

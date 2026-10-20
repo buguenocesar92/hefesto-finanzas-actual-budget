@@ -1,4 +1,3 @@
-name: ${COMPOSE_PROJECT_NAME:-hefesto-finanzas}
 services:
   permissions:
     image: actualbudget/actual-server:26.10.0@sha256:24645e971da6bb1a1f953d6859e307a0b29be1e8b4130a35b3220c209b5b860c
@@ -28,11 +27,20 @@ services:
       ACTUAL_ALLOWED_LOGIN_METHODS: password
       ACTUAL_TOKEN_EXPIRATION: "1440"
       ACTUAL_CORS_PROXY_ENABLED: "false"
-      BOOTSTRAP_MODE: "false"
+      BOOTSTRAP_MODE: ${BOOTSTRAP_MODE:-false}
       TZ: America/Santiago
     expose: ["5006"]
     networks: [backend]
     volumes: [data:/data, ./ops:/opt/hefesto:ro]
+    healthcheck:
+      # La imagen actualbudget/actual-server expone /health (nodo UP) desde
+      # 22.10.25 y la imagen Debian-slim no incluye nc, así que el check se
+      # hace con node inline. Sin credenciales: ni header, ni cookie, ni query.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5006/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
   gateway:
     image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     restart: unless-stopped
@@ -44,6 +52,14 @@ services:
     expose: ["8080"]
     networks: [default, backend]
     volumes: [./ops:/opt/hefesto:ro]
+    healthcheck:
+      # Gateway responde 401 sin credenciales (por diseño); un TCP check basta
+      # para detectar el puerto, sin exigir 200 ni autenticación.
+      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
   filetools:
     image: actualbudget/actual-server:26.10.0@sha256:24645e971da6bb1a1f953d6859e307a0b29be1e8b4130a35b3220c209b5b860c
     profiles: [tools]
