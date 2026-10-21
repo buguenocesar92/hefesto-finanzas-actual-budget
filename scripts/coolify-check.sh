@@ -191,6 +191,7 @@ done
 # El contrato exige healthcheck solo en el servicio web que Coolify expone,
 # que es gateway. app no se valida porque su check depende del endpoint
 # /health interno y de la imagen upstream; se documenta en el README.
+# shellcheck disable=SC2043  # el contrato solo exige gateway: el bucle recorre una sola vez a proposito
 for svc in gateway; do
     if ! printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"]" >/dev/null; then
         continue
