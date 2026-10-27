@@ -191,18 +191,15 @@ done
 # El contrato exige healthcheck solo en el servicio web que Coolify expone,
 # que es gateway. app no se valida porque su check depende del endpoint
 # /health interno y de la imagen upstream; se documenta en el README.
-for svc in gateway; do
-    if ! printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"]" >/dev/null; then
-        continue
-    fi
+svc=gateway
+if printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"]" >/dev/null; then
     PROFILES_JSON="$(printf '%s\n' "$RENDER" | jq -c ".services[\"$svc\"].profiles // []")"
-    if [[ "$PROFILES_JSON" != "[]" ]]; then
-        continue
+    if [[ "$PROFILES_JSON" == "[]" ]]; then
+        if ! printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"].healthcheck" >/dev/null; then
+            record_fail "$svc" "falta healthcheck que no dependa de credenciales"
+        fi
     fi
-    if ! printf '%s\n' "$RENDER" | jq -e ".services[\"$svc\"].healthcheck" >/dev/null; then
-        record_fail "$svc" "falta healthcheck que no dependa de credenciales"
-    fi
-done
+fi
 
 if [[ "$FAIL" -ne 0 ]]; then
     echo "coolify-check: FAIL"
